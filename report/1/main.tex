@@ -97,7 +97,7 @@
 
 \begin{itemize}
   \item 许震宇
-  \item 中国科学院大学（北京怀柔），分数线仅次于清北
+  \item 中国科学院大学（北京）
   \item 家在深圳、港籍
   \item 徒步、网球、滑雪...
 \end{itemize}
@@ -140,9 +140,51 @@
 \end{itemize}
 
 
+\section{构建代码框架}
+\subsection{目录结构}
+\begin{verbatim}
+UBS_Quant/
+  assets/                  # 原始数据与静态资源
+    MinutesIdx.h5
+  output/                  # 回测输出（gitignore）
+  report/                  # 报告与说明文档
+    1/
+      main.tex
+      tex_file/head.tex
+  src/                     # 源码入口目录
+    quant_research/
+      run_experiment.py     # 主流程入口
+      data/                 # 数据读取与特征构建
+        loader.py
+        handler.py
+      backtest/             # 回测与指标
+        engine.py
+        metrics.py
+      portfolio/            # 组合与净值曲线
+        allocator.py
+      features/             # 特征基础定义
+        base.py
+\end{verbatim}
 
+\subsection{主文件流程（run\_experiment.py）}
+\begin{itemize}
+  \item 配置阶段：定义数据配置、模型配置与回测配置（执行时刻、模式等）。
+  \item 数据准备：\texttt{SimpleDataset.prepare} 读取原始数据并通过 \texttt{FeatureHandler} 构建特征/信号。
+  \item 记录入口：\texttt{Experiment} 打开实验上下文并记录参数。
+  \item 信号生成：\texttt{SignalRecord.generate} 输出 \texttt{signals.csv}。
+  \item 信号分析：\texttt{SigAnaRecord.generate} 先生成收益列，再计算 Sharpe，输出 \texttt{sharpe\_by\_exec.csv} 与分析图。
+  \item 组合回测：\texttt{PortAnaRecord.generate} 选择执行时刻，计算收益并输出 \texttt{equity\_curve.csv}。
+  \item 结果落盘：输出 \texttt{readouts\_full.csv} 以便后续分析。
+\end{itemize}
 
-
+\section{阅读alpha101}
+几个印象挺深的点：\begin{itemize}
+  \item 将 alpha 分为：1. momentum; 2. mean-reversion；
+  \item significant dependence on the turnover $T_i$ here, while the average daily return $R_i$ is strongly
+        correlated with the daily return volatility $\sigma_i$ and we have the scaling property (1)
+        with $X \approx 0.76$.
+  \item alphas are ephemeral（短暂的）
+\end{itemize}
 
 
 \end{document}

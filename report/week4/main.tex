@@ -1,0 +1,166 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper]{geometry}
+\geometry{left=2.0cm,right=2.0cm,top=2.5cm,bottom=2.5cm}
+
+\usepackage[fontset=fandol]{ctex}
+\usepackage{amsmath,amsfonts,graphicx,amssymb,booktabs,tabularx,float,zhnumber,longtable}
+\usepackage[capitalize]{cleveref}
+\Crefname{section}{Section}{Sections}
+\Crefname{table}{Table}{Tables}
+\crefname{table}{Table.}{Tabs.}
+\punctstyle{kaiming}
+
+\renewcommand \thesection{\zhnum{section}、}
+\renewcommand \thesubsection{\arabic{subsection}}
+
+\newcommand{\name}{许震宇}
+\newcommand{\mydate}{2026.3.5}
+
+\begin{document}
+
+\input{tex_file/head.tex}
+
+\section{Week 4：基线模型评估}
+
+本周目标：基于真实期权交易数据，完成 BSM 基线误差评估（MAE/RMSE），并识别失效场景。
+
+\subsection{BSM 公式与参数映射（来自 \texttt{equation.md}）}
+
+\[
+C = S_0 e^{-qT}N(d_1)-Ke^{-rT}N(d_2), \quad
+P = Ke^{-rT}N(-d_2)-S_0 e^{-qT}N(-d_1)
+\]
+
+\[
+d_1=\frac{\ln(S_0/K)+(r-q+\tfrac{1}{2}\sigma^2)T}{\sigma\sqrt{T}}, \quad
+d_2=d_1-\sigma\sqrt{T}
+\]
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.12}
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    参数 & 含义 & 本项目实现 \\
+    \midrule
+    $S_0$ & 标的现价 & 由 \texttt{panel.csv} 的 \texttt{equity\_close}（或 \texttt{equity\_adj\_close}）按 \texttt{date} 合并 \\
+    $K$ & 行权价 & 来自 \texttt{options\_history.csv} 的 \texttt{strike} \\
+    $T$ & 剩余期限（年） & $T=(\texttt{expiration}-\texttt{date})/365$ \\
+    $r$ & 无风险利率 & 对比 \texttt{DGS3MO/DGS6MO/DGS1/DGS2/DGS5/DGS7/DGS10}；最终采用 \texttt{DGS3MO} \\
+    $q$ & 连续分红率 & 使用 trailing\_div\_12m（过去12个月累计股息/现价） \\
+    $\sigma$ & 波动率 & 对比 IV、RV 与 blend，最终采用 \texttt{blend\_iv\_rv252\_75\_25} \\
+    type & 看涨/看跌 & \texttt{options\_history.csv} 的 \texttt{type}（call/put） \\
+    \bottomrule
+  \end{tabularx}
+  \caption{BSM 参数映射}
+\end{table}
+
+\subsection{基础结果（全样本）}
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    指标 & n & MAE & RMSE \\
+    \midrule
+    overall & 1,961,920 & 8.5123 & 21.4997 \\
+    \bottomrule
+  \end{tabular}
+  \caption{全样本基线误差}
+\end{table}
+
+\subsection{失效场景分析}
+
+由 \texttt{metrics\_error\_profile.csv} 可见：
+\begin{itemize}
+  \item \textbf{Call 显著高于 Put}：Call MAE 12.45，Put MAE 4.58。
+  \item \textbf{长久期误差显著放大}：$>6m$ MAE 18.84，$\le 1w$ MAE 1.10。
+  \item \textbf{深度虚值误差最高}：\texttt{deep\_otm} MAE 13.30。
+  \item \textbf{高波动分组差异较小}：\texttt{high\_vol} 与 \texttt{non\_high\_vol} MAE 接近。
+\end{itemize}
+
+\subsection{失效场景详细分组表}
+\begingroup
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{llrrrrrr}
+\toprule
+dimension & bucket & n & mae & rmse & med\_abs\_error & p90\_abs\_error & large\_error\_rate \\
+\midrule
+\endfirsthead
+\toprule
+dimension & bucket & n & mae & rmse & med\_abs\_error & p90\_abs\_error & large\_error\_rate \\
+\midrule
+\endhead
+option\_type & call & 231820 & 6.5243 & 18.7326 & 0.4492 & 15.9958 & 0.1575 \\
+option\_type & put & 220731 & 1.2121 & 3.8301 & 0.2210 & 2.7628 & 0.0396 \\
+is\_high\_vol & FALSE & 346894 & 4.3795 & 14.9321 & 0.2938 & 7.7970 & 0.1074 \\
+is\_high\_vol & TRUE & 105657 & 2.4684 & 8.2776 & 0.3207 & 5.1236 & 0.0758 \\
+is\_sent\_shift & FALSE & 452551 & 3.9333 & 13.6715 & 0.2997 & 6.8250 & 0.1000 \\
+moneyness\_bucket & deep\_otm & 63842 & 8.8696 & 23.2122 & 0.4223 & 32.9795 & 0.1840 \\
+moneyness\_bucket & otm & 79745 & 4.7610 & 15.0443 & 0.3349 & 10.5499 & 0.1354 \\
+moneyness\_bucket & atm & 117039 & 3.3079 & 10.9927 & 0.4101 & 7.3080 & 0.1051 \\
+moneyness\_bucket & itm & 86195 & 2.4179 & 9.7398 & 0.2419 & 3.8858 & 0.0651 \\
+moneyness\_bucket & deep\_itm & 105730 & 2.2560 & 9.6368 & 0.2047 & 3.1033 & 0.0454 \\
+ttm\_bucket & <=1w & 69541 & 0.2266 & 0.5870 & 0.0449 & 0.5586 & 0.0000 \\
+ttm\_bucket & 1w-1m & 153053 & 1.1373 & 2.8485 & 0.1905 & 3.4559 & 0.0537 \\
+ttm\_bucket & 1m-3m & 89756 & 2.7480 & 7.1539 & 0.3345 & 10.0428 & 0.1142 \\
+ttm\_bucket & 3m-6m & 56441 & 5.7850 & 15.4186 & 0.6259 & 17.8599 & 0.1386 \\
+ttm\_bucket & >6m & 83760 & 12.1421 & 27.9233 & 1.8544 & 58.2036 & 0.2265 \\
+iv\_bucket & q1 & 90512 & 9.7387 & 24.3085 & 0.5577 & 34.7194 & 0.2212 \\
+iv\_bucket & q2 & 90518 & 3.6516 & 12.8222 & 0.3259 & 6.4564 & 0.0972 \\
+iv\_bucket & q3 & 90502 & 4.2181 & 12.5887 & 0.3627 & 10.3567 & 0.1295 \\
+iv\_bucket & q4 & 90531 & 1.5031 & 4.0349 & 0.3697 & 4.0985 & 0.0421 \\
+iv\_bucket & q5 & 90488 & 0.5548 & 2.1126 & 0.1202 & 1.1437 & 0.0100 \\
+price\_bucket & q1 & 91038 & 1.0945 & 6.4901 & 0.0339 & 0.2670 & 0.0333 \\
+price\_bucket & q2 & 90051 & 2.5810 & 10.5314 & 0.2168 & 2.8030 & 0.0751 \\
+price\_bucket & q3 & 90709 & 3.6271 & 12.8386 & 0.3855 & 5.2072 & 0.0912 \\
+price\_bucket & q4 & 90346 & 4.8472 & 15.6498 & 0.5209 & 7.2344 & 0.1067 \\
+price\_bucket & q5 & 90407 & 7.5328 & 19.3026 & 1.1930 & 17.9335 & 0.1940 \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+\subsection{参数优化结果}
+
+优化策略：
+\begin{itemize}
+  \item 真实价格口径使用 \texttt{mid\_only}（仅 bid/ask 中间价）；
+  \item 流动性过滤：\texttt{volume > 10}；
+  \item 波动率固定为 \texttt{blend\_iv\_rv252\_75\_25}；
+  \item 分红率采用 \texttt{trailing\_div\_12m}；
+  \item 比较不同期限国债利率作为 $r$。
+\end{itemize}
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    $r$ 来源 & n & MAE & RMSE \\
+    \midrule
+    DGS3MO & 452,551 & \textbf{3.9333} & \textbf{13.6715} \\
+    DGS6MO & 452,551 & 4.0782 & 14.0191 \\
+    DGS1   & 452,551 & 4.3426 & 14.6341 \\
+    DGS2   & 452,551 & 4.8317 & 15.4913 \\
+    DGS5   & 452,551 & 6.6349 & 18.6180 \\
+    DGS7   & 452,551 & 7.6676 & 20.5994 \\
+    DGS10  & 452,551 & 8.5450 & 22.2081 \\
+    \bottomrule
+  \end{tabular}
+  \caption{$r$ 对比（固定 \texttt{blend\_iv\_rv252\_75\_25}, \texttt{mid\_only}, \texttt{volume>10}）}
+\end{table}
+
+\subsection{结论}
+
+Week4 可交付结论如下：
+\begin{itemize}
+  \item 已建立 BSM baseline，并完成 MAE/RMSE 计算；
+  \item 已识别主要失效场景：call、深度虚值、长久期；
+  \item 参数优化后最优配置为：\\
+  \texttt{DGS3MO + blend\_iv\_rv252\_75\_25 +}\\
+  \texttt{mid\_only + volume>10 + trailing\_div\_12m}；
+  \item 最优配置下 MAE/RMSE 相较初始全样本基线显著下降。
+\end{itemize}
+
+\end{document}

@@ -13,6 +13,7 @@ def fetch_yahoo_daily(
     end: date | str,
     *,
     auto_adjust: bool = False,
+    actions: bool = False,
 ) -> "pd.DataFrame":
     """Fetch Yahoo Finance daily OHLCV via yfinance.
 
@@ -36,7 +37,7 @@ def fetch_yahoo_daily(
         interval="1d",
         auto_adjust=auto_adjust,
         progress=False,
-        actions=False,
+        actions=actions,
         threads=True,
     )
     if df is None or df.empty:

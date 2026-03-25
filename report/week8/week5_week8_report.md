@@ -33,11 +33,14 @@ Delivered items:
 
 ### Key explainability result (global)
 Most influential features (delta MAE descending):
-1. `log_moneyness`
-2. `is_call`
-3. `moneyness`
-4. `sqrt_ttm`
-5. `q`
+
+| Rank | Feature | delta MAE |
+|---:|---|---:|
+| 1 | `log_moneyness` | 25.423673 |
+| 2 | `is_call` | 20.874212 |
+| 3 | `moneyness` | 2.603320 |
+| 4 | `sqrt_ttm` | 1.953568 |
+| 5 | `q` | 0.150669 |
 
 Interpretation: model decisions are mainly driven by moneyness and option side, consistent with option pricing structure.
 

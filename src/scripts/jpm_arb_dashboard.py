@@ -5,7 +5,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +134,30 @@ def _parse_expiry(x: Any) -> date | None:
         return None
 
 
+def _parse_ts_any(x: Any) -> datetime | None:
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    dt = pd.to_datetime(s, errors="coerce", utc=True)
+    if pd.isna(dt):
+        return None
+    try:
+        return dt.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _extract_best_ts(row: pd.Series, cols: list[str]) -> datetime | None:
+    for c in cols:
+        if c in row and row[c] is not None:
+            dt = _parse_ts_any(row[c])
+            if dt is not None:
+                return dt
+    return None
+
+
 def _norm_option_type(x: Any) -> str | None:
     s = str(x or "").strip().lower()
     if not s:
@@ -240,6 +264,19 @@ def _to_canonical_options(df: pd.DataFrame) -> pd.DataFrame:
     col_iv = _pick_col(out, ["implied_volatility_quote", "implied_volatility", "option_implied_volatility", "iv"])
     col_vol = _pick_col(out, ["volume_quote", "volume"])
     col_oi = _pick_col(out, ["open_interest_quote", "open_interest"])
+    col_quote_ts = _pick_col(
+        out,
+        [
+            "quote_time",
+            "update_time",
+            "update_time_quote",
+            "data_time",
+            "svr_recv_time_bid",
+            "svr_recv_time_ask",
+            "timestamp",
+            "last_trade_time",
+        ],
+    )
 
     keep = pd.DataFrame(
         {
@@ -254,6 +291,7 @@ def _to_canonical_options(df: pd.DataFrame) -> pd.DataFrame:
             "iv": pd.to_numeric(out[col_iv], errors="coerce") if col_iv else math.nan,
             "volume": pd.to_numeric(out[col_vol], errors="coerce") if col_vol else 0.0,
             "open_interest": pd.to_numeric(out[col_oi], errors="coerce") if col_oi else 0.0,
+            "quote_ts": out[col_quote_ts] if col_quote_ts else None,
         }
     )
     keep["option_type"] = keep["option_type"].fillna("")
@@ -263,6 +301,7 @@ def _to_canonical_options(df: pd.DataFrame) -> pd.DataFrame:
     keep = keep[keep["expiration_dt"].notna()]
     keep["option_code"] = keep["option_code"].fillna("").astype(str)
     keep = keep[keep["option_code"].str.len() >= 6]
+    keep["quote_ts"] = keep["quote_ts"].map(_parse_ts_any)
     keep.reset_index(drop=True, inplace=True)
     return keep
 
@@ -370,13 +409,15 @@ def _load_dotenv() -> None:
             os.environ[k] = v
 
 
-def _fetch_alpha_quote(symbol: str, api_key: str) -> float | None:
+def _fetch_alpha_quote(symbol: str, api_key: str) -> tuple[float | None, datetime | None]:
     params = {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": api_key}
     resp = requests.get("https://www.alphavantage.co/query", params=params, timeout=20)
     resp.raise_for_status()
     payload = resp.json()
     q = payload.get("Global Quote", {})
-    return _safe_float(q.get("05. price"))
+    price = _safe_float(q.get("05. price"))
+    ts = _parse_ts_any(q.get("07. latest trading day"))
+    return price, ts
 
 
 def _fetch_alpha_options(symbol: str, api_key: str, date_str: str) -> pd.DataFrame:
@@ -400,7 +441,7 @@ def fetch_from_alpha_vantage(
     if not api_key:
         return None, pd.DataFrame(), "AlphaVantage API key missing"
     try:
-        spot = _fetch_alpha_quote(symbol, api_key)
+        spot, ts = _fetch_alpha_quote(symbol, api_key)
         options = pd.DataFrame()
         for lag in range(0, 7):
             d = (date.today() - timedelta(days=lag)).isoformat()
@@ -412,6 +453,7 @@ def fetch_from_alpha_vantage(
         if right.upper() in {"CALL", "PUT"}:
             options = options[options["option_type"] == right.lower()]
         options = options.head(int(max_contracts)).copy()
+        options["source_spot_ts"] = ts
         return spot, options, None
     except Exception as e:
         return None, pd.DataFrame(), f"alpha fetch exception: {e}"
@@ -508,7 +550,8 @@ def compute_opportunities(
         vega = _bs_vega(s=spot, k=strike, t=t, r=r, q=q, sigma=max(use_iv, 1e-4))
         delta = _bs_delta(is_call=is_call, s=spot, k=strike, t=t, r=r, q=q, sigma=max(use_iv, 1e-4))
         cost = float(fee_per_contract) + (float(slippage_bps) / 10000.0) * mid + float(spread_cross_ratio) * spread
-        edge = abs(mispricing) - cost
+        gross_edge = abs(mispricing)
+        net_edge = gross_edge - cost
         action = "BUY_UNDERVALUE" if mispricing < 0 else "SELL_OVERVALUE"
         volume = _safe_float(row.get("volume")) or 0.0
         oi = _safe_float(row.get("open_interest")) or 0.0
@@ -523,13 +566,15 @@ def compute_opportunities(
                 "mid_price": mid,
                 "model_fair": fair,
                 "mispricing": mispricing,
-                "abs_mispricing": abs(mispricing),
+                "abs_mispricing": gross_edge,
                 "iv_mkt": iv_mkt,
                 "iv_fair": iv_fair,
                 "vol_edge": vol_edge,
                 "vol_action": vol_action,
                 "est_cost": cost,
-                "edge": edge,
+                "gross_edge": gross_edge,
+                "net_edge": net_edge,
+                "edge": net_edge,
                 "action": action,
                 "bid": bid,
                 "ask": ask,
@@ -627,9 +672,12 @@ def run_app() -> None:
         return
 
     fetch_errors: list[str] = []
+    data_checks: list[str] = []
     spot: float | None = None
     options_df = pd.DataFrame()
     used_source = ""
+    futu_ref_ts: datetime | None = None
+    alpha_spot_ts: datetime | None = None
 
     if source == "Hybrid (Futu options + Alpha spot)":
         used_source = "Hybrid"
@@ -648,10 +696,19 @@ def run_app() -> None:
         av_spot = None
         if str(av_key).strip():
             try:
-                av_spot = _fetch_alpha_quote(symbol, str(av_key).strip())
+                av_spot, alpha_spot_ts = _fetch_alpha_quote(symbol, str(av_key).strip())
             except Exception as e:
                 fetch_errors.append(f"AlphaVantage spot: {e}")
         spot = av_spot if av_spot is not None else futu_spot
+        if not futu_opt.empty and "quote_ts" in futu_opt.columns:
+            try:
+                futu_ref_ts = pd.to_datetime(futu_opt["quote_ts"], errors="coerce", utc=True).max()
+                if pd.isna(futu_ref_ts):
+                    futu_ref_ts = None
+                else:
+                    futu_ref_ts = futu_ref_ts.to_pydatetime()
+            except Exception:
+                futu_ref_ts = None
     elif source in {"Auto", "Futu"}:
         used_source = "Futu"
         spot, options_df, err = fetch_from_futu(
@@ -675,6 +732,8 @@ def run_app() -> None:
         )
         if err:
             fetch_errors.append(f"AlphaVantage: {err}")
+        if not options_df.empty:
+            alpha_spot_ts = _extract_best_ts(options_df.iloc[0], ["source_spot_ts"])
 
     if float(spot_override) > 0:
         spot = float(spot_override)
@@ -701,7 +760,34 @@ def run_app() -> None:
         st.warning("No valid option rows after normalization.")
         return
 
-    filt = opp[(opp["edge"] >= float(min_edge)) & (opp["open_interest"] >= float(min_oi)) & (opp["volume"] >= float(min_vol))].copy()
+    # Timestamp alignment and freshness checks for mixed-source mode.
+    now_utc = datetime.now(timezone.utc)
+    stale_limit_sec = 15 * 60
+    align_limit_sec = 5 * 60
+    if used_source == "Hybrid":
+        if futu_ref_ts and alpha_spot_ts:
+            align_delta = abs((futu_ref_ts - alpha_spot_ts).total_seconds())
+            status = "PASS" if align_delta <= align_limit_sec else "WARN"
+            data_checks.append(
+                f"Hybrid timestamp align: {status} (|Futu option ts - Alpha spot ts|={align_delta:.0f}s, threshold={align_limit_sec}s)"
+            )
+        else:
+            data_checks.append("Hybrid timestamp align: WARN (missing timestamp from one or both sources)")
+        if futu_ref_ts:
+            futu_age = (now_utc - futu_ref_ts).total_seconds()
+            s = "PASS" if futu_age <= stale_limit_sec else "WARN"
+            data_checks.append(f"Futu options freshness: {s} (age={futu_age:.0f}s, SLA={stale_limit_sec}s)")
+        if alpha_spot_ts:
+            alpha_age = (now_utc - alpha_spot_ts).total_seconds()
+            s = "PASS" if alpha_age <= stale_limit_sec else "WARN"
+            data_checks.append(f"Alpha spot freshness: {s} (age={alpha_age:.0f}s, SLA={stale_limit_sec}s)")
+
+    # Signal confirmation: BOTH requires price edge and vol edge to pass thresholds.
+    opp["price_signal_ok"] = opp["edge"] >= float(min_edge)
+    opp["vol_signal_ok"] = opp["vol_edge"].notna() & (opp["vol_edge"].abs() >= float(min_abs_vol_edge))
+    opp["signal_confirmed"] = opp["price_signal_ok"] & opp["vol_signal_ok"]
+    opp["signal_logic"] = opp["signal_confirmed"].map(lambda x: "CONFIRMED_BOTH" if bool(x) else "UNCONFIRMED")
+    filt = opp[(opp["price_signal_ok"]) & (opp["open_interest"] >= float(min_oi)) & (opp["volume"] >= float(min_vol))].copy()
     filt_vol = opp[
         (opp["vol_edge"].notna())
         & (opp["open_interest"] >= float(min_oi))
@@ -735,8 +821,15 @@ def run_app() -> None:
         "mid_price",
         "model_fair",
         "mispricing",
+        "abs_mispricing",
+        "gross_edge",
         "est_cost",
+        "net_edge",
         "edge",
+        "price_signal_ok",
+        "vol_signal_ok",
+        "signal_confirmed",
+        "signal_logic",
         "action",
         "iv_mkt",
         "iv_fair",
@@ -777,6 +870,8 @@ def run_app() -> None:
 
     if fetch_errors:
         st.caption("Fetch warnings:\n" + "\n".join(fetch_errors))
+    if data_checks:
+        st.caption("Data quality checks:\n" + "\n".join(data_checks))
 
 
 if __name__ == "__main__":

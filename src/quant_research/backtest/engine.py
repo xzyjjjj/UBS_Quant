@@ -25,10 +25,10 @@ def _price_at(day_df: pd.DataFrame, t_exec: int) -> float:
 
 
 def evaluate_return_t_p1(
-    target_raw: pd.DataFrame, readouts: pd.DataFrame, t_exec: int, strategy_col: str
+    target_raw: pd.DataFrame, readouts: pd.DataFrame, t_exec: int, action_col: str
 ) -> pd.Series:
     dates = list(readouts.index)
-    strategy = np.array(readouts[strategy_col].tolist()[:-2])
+    strategy = np.array(readouts[action_col].tolist()[:-2])
 
     short_price_t_p1 = []
     long_price_t_p2 = []

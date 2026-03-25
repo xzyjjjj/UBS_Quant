@@ -101,7 +101,8 @@ class SimpleDataset:
 
 @dataclass
 class SimpleModel:
-    strategy_col: str = "default_st"
+    alpha_col: str = "default_st"
+    action_col: str = "action_default_st"
     fitted: bool = False
 
     def fit(self, dataset: SimpleDataset) -> None:
@@ -109,7 +110,7 @@ class SimpleModel:
         self.fitted = True
 
 
-class SignalRecord:
+class AlphaRecord:
     def __init__(self, model: SimpleModel, dataset: SimpleDataset, recorder: Recorder) -> None:
         self.model = model
         self.dataset = dataset
@@ -118,31 +119,40 @@ class SignalRecord:
     def generate(self) -> None:
         if self.dataset.readouts is None:
             raise ValueError("Dataset not prepared.")
-        signal_generation(self.dataset.readouts, self.recorder.output_dir)
+        alpha_generation(self.dataset.readouts, self.recorder.output_dir, self.dataset.handler.alpha_list)
 
 
-class SigAnaRecord:
+def alpha_to_action_identity(readouts: pd.DataFrame, alpha_col: str, action_col: str) -> None:
+    readouts[action_col] = readouts[alpha_col]
+
+
+class DecisionRecord:
     def __init__(
         self,
+        model: SimpleModel,
+        dataset: SimpleDataset,
         recorder: Recorder,
         exec_grid: Iterable[int],
-        target_raw: pd.DataFrame,
-        readouts: pd.DataFrame,
-        strategy_col: str,
     ) -> None:
+        self.model = model
+        self.dataset = dataset
         self.recorder = recorder
         self.exec_grid = exec_grid
-        self.target_raw = target_raw
-        self.readouts = readouts
-        self.strategy_col = strategy_col
 
     def generate(self) -> pd.DataFrame:
-        return_generation(self.target_raw, self.readouts, self.exec_grid, self.strategy_col)
-        sharpe_by_exec = sharpe_generation(self.readouts, self.exec_grid, self.strategy_col)
+        if self.dataset.readouts is None:
+            raise ValueError("Dataset not prepared.")
+        if self.dataset.target_raw is None:
+            raise ValueError("Dataset not prepared.")
+        alpha_to_action_identity(self.dataset.readouts, self.model.alpha_col, self.model.action_col)
+        action_generation(self.dataset.readouts, self.recorder.output_dir, [self.model.action_col])
+        return_generation(
+            self.dataset.target_raw, self.dataset.readouts, self.exec_grid, self.model.action_col
+        )
+        sharpe_by_exec = sharpe_generation(self.dataset.readouts, self.exec_grid, self.model.action_col)
         if not sharpe_by_exec.empty:
-            training_report(sharpe_by_exec, self.recorder.output_dir)
+            training_report(sharpe_by_exec, self.recorder.output_dir, self.model.action_col)
         return sharpe_by_exec
-
 
 class PortAnaRecord:
     def __init__(
@@ -152,17 +162,17 @@ class PortAnaRecord:
         sharpe_by_exec: pd.DataFrame,
         target_raw: pd.DataFrame,
         readouts: pd.DataFrame,
-        strategy_col: str,
+        action_col: str,
     ) -> None:
         self.recorder = recorder
         self.cfg = cfg
         self.sharpe_by_exec = sharpe_by_exec
         self.target_raw = target_raw
         self.readouts = readouts
-        self.strategy_col = strategy_col
+        self.action_col = action_col
 
-    def generate(self) -> pd.Series:
-        return backtest(self.cfg, self.sharpe_by_exec, self.target_raw, self.readouts, self.strategy_col)
+    def generate(self) -> tuple[pd.Series, int]:
+        return backtest(self.cfg, self.sharpe_by_exec, self.target_raw, self.readouts, self.action_col)
 
 def dataset_formatting(readouts: pd.DataFrame) -> pd.DataFrame:
     readouts = readouts.copy()
@@ -178,49 +188,61 @@ def data_sample(readouts: pd.DataFrame, output_dir: Path) -> None:
     readouts.head(10).to_csv(output_dir / "data_sample.csv", index=True)
 
 
-def training_report(sharpe_by_exec: pd.DataFrame, output_dir: Path) -> None:
-    sharpe_by_exec.to_csv(output_dir / "sharpe_by_exec.csv", index=False)
+def training_report(sharpe_by_exec: pd.DataFrame, output_dir: Path, action_col: str) -> None:
+    sharpe_by_exec.to_csv(output_dir / f"sharpe_by_exec_{action_col}.csv", index=False)
 
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 4))
     ax.plot(sharpe_by_exec["t_exec"], sharpe_by_exec["sharpe"], c="blue", label="sharpe ratio")
     ax.scatter(sharpe_by_exec["t_exec"], sharpe_by_exec["sharpe"], c="blue")
-    ax.set_title("time sensitivity of default_st")
+    ax.set_title(f"time sensitivity of {action_col}")
     ax.set_xlabel("trading time (min)")
     ax.set_ylabel("sharpe ratio")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_dir / "time_sensitivity_default_st.png", dpi=150)
+    fig.savefig(output_dir / f"time_sensitivity_{action_col}.png", dpi=150)
     plt.close(fig)
 
 
-def signal_generation(readouts: pd.DataFrame, output_dir: Path) -> None:
-    readouts[["default_st"]].to_csv(output_dir / "signals.csv", index=True)
+def alpha_generation(
+    readouts: pd.DataFrame,
+    output_dir: Path,
+    alpha_cols: Iterable[str],
+) -> None:
+    readouts[list(alpha_cols)].to_csv(output_dir / "alphas.csv", index=True)
+
+
+def action_generation(
+    readouts: pd.DataFrame,
+    output_dir: Path,
+    action_cols: Iterable[str],
+) -> None:
+    readouts[list(action_cols)].to_csv(output_dir / "actions.csv", index=True)
 
 
 def return_generation(
     target_raw: pd.DataFrame,
     readouts: pd.DataFrame,
     exec_grid: Iterable[int],
-    strategy_col: str,
+    action_col: str,
 ) -> None:
     for t_exec in exec_grid:
-        return_col = f"return_{strategy_col}_{t_exec}"
+        return_col = f"return_{action_col}_{t_exec}"
         if return_col in readouts.columns:
             continue
-        returns = evaluate_return_t_p1(target_raw, readouts, t_exec, strategy_col)
+        returns = evaluate_return_t_p1(target_raw, readouts, t_exec, action_col)
         readouts[return_col] = returns
 
 
 def sharpe_generation(
     readouts: pd.DataFrame,
     exec_grid: Iterable[int],
-    strategy_col: str,
+    action_col: str,
 ) -> pd.DataFrame:
     sharpe_rows = []
     for t_exec in exec_grid:
-        return_col = f"return_{strategy_col}_{t_exec}"
+        return_col = f"return_{action_col}_{t_exec}"
         if return_col not in readouts.columns:
             raise ValueError(f"Missing return column: {return_col}")
         sharpe = sharpe_ratio(readouts[return_col])
@@ -252,11 +274,11 @@ def cal_return(
     target_raw: pd.DataFrame,
     readouts: pd.DataFrame,
     t_exec: int,
-    strategy_col: str,
+    action_col: str,
 ) -> pd.Series:
-    return_col = f"return_{strategy_col}_{t_exec}"
+    return_col = f"return_{action_col}_{t_exec}"
     if return_col not in readouts.columns:
-        returns = evaluate_return_t_p1(target_raw, readouts, t_exec, strategy_col)
+        returns = evaluate_return_t_p1(target_raw, readouts, t_exec, action_col)
         readouts[return_col] = returns
     return readouts[return_col]
 
@@ -265,18 +287,106 @@ def write_equity_curve(return_series: pd.Series, output_dir: Path) -> None:
     equity_curve(return_series).to_csv(output_dir / "equity_curve.csv", index=True)
 
 
+def plot_equity_curve(
+    return_series: pd.Series, output_dir: Path, title: str = "Equity Curve"
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "matplotlib is required to plot equity curve. "
+            "Install it (e.g. `pip install matplotlib`) and rerun."
+        ) from e
+
+    equity = equity_curve(return_series)
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    ax.plot(equity.index, equity.values, color="#2f6fb0")
+    ax.set_title(title)
+    ax.set_ylabel("Equity")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_dir / "equity_curve.png", dpi=150)
+    plt.close(fig)
+
+
+def max_drawdown(equity: pd.Series) -> float:
+    equity = equity.dropna()
+    if equity.empty:
+        return float("nan")
+    peak = equity.cummax()
+    drawdown = equity / peak - 1.0
+    return float(drawdown.min())
+
+
+def summarize_performance(return_series: pd.Series, annualization: float = 250.0) -> Dict[str, float]:
+    returns = return_series.dropna()
+    if returns.empty:
+        return {
+            "samples": 0.0,
+            "total_return": float("nan"),
+            "annualized_return": float("nan"),
+            "sharpe": float("nan"),
+            "max_drawdown": float("nan"),
+        }
+
+    equity = equity_curve(returns)
+    total_return = float(equity.iloc[-1] - 1.0)
+    samples = float(len(returns))
+    ann_return = float((1.0 + total_return) ** (annualization / samples) - 1.0)
+    return {
+        "samples": samples,
+        "total_return": total_return,
+        "annualized_return": ann_return,
+        "sharpe": sharpe_ratio(returns),
+        "max_drawdown": max_drawdown(equity),
+    }
+
+
+def print_backtest_report(
+    return_series: pd.Series, output_dir: Path, action_col: str, t_exec: int
+) -> None:
+    stats = summarize_performance(return_series)
+    print("\n[report] backtest summary")
+    print(f"[report] action_col: {action_col}")
+    print(f"[report] t_exec: {t_exec}")
+    print(f"[report] samples: {int(stats['samples'])}")
+    print(f"[report] total_return: {stats['total_return']:.4f}")
+    print(f"[report] annualized_return: {stats['annualized_return']:.4f}")
+    print(f"[report] sharpe: {stats['sharpe']:.4f}")
+    print(f"[report] max_drawdown: {stats['max_drawdown']:.4f}")
+    print(f"[report] equity_curve.csv: {output_dir / 'equity_curve.csv'}")
+    print(f"[report] equity_curve.png: {output_dir / 'equity_curve.png'}\n")
+
+
+def print_saved_artifacts(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    files = sorted(p for p in output_dir.iterdir() if p.is_file())
+    if not files:
+        return
+    print("[report] saved artifacts:")
+    for path in files:
+        print(f"[report] - {path}")
+    print("")
+
+
 def backtest(
     cfg: Config,
     sharpe_by_exec: pd.DataFrame,
     target_raw: pd.DataFrame,
     readouts: pd.DataFrame,
-    strategy_col: str,
-) -> pd.Series:
+    action_col: str,
+) -> tuple[pd.Series, int]:
     """Select exec time, compute return series, and write equity curve."""
     chosen_exec = select_exec_time(cfg, sharpe_by_exec, target_raw, readouts)
-    return_series = cal_return(target_raw, readouts, chosen_exec, strategy_col)
+    return_series = cal_return(target_raw, readouts, chosen_exec, action_col)
     write_equity_curve(return_series, cfg.output_dir)
-    return return_series
+    plot_equity_curve(
+        return_series,
+        cfg.output_dir,
+        title=f"Equity Curve ({action_col}, t_exec={chosen_exec})",
+    )
+    return return_series, chosen_exec
 
 
 def main() -> int:
@@ -309,49 +419,58 @@ def main() -> int:
     }
     model_task = {
         "class": "SimpleModel",
-        "kwargs": {"strategy_col": "default_st"},
+        "kwargs": {"alpha_col": "default_st", "action_col": "action_default_st"},
     }
 
     model = init_instance_by_config(model_task)
-    dataset = init_instance_by_config(data_task)
+    dataset = init_instance_by_config(data_task) 
 
-    example_df = dataset.prepare("train")
-    data_sample(example_df, cfg.output_dir)
+    example_df = dataset.prepare("train")        # 这一步会把 feature 加好
+    data_sample(example_df, cfg.output_dir)      # 输出一份数据的样例
 
     with Experiment(name="workflow", output_dir=cfg.output_dir) as recorder:
         recorder.log_params(
             t_exec=cfg.t_exec,
             exec_grid=cfg.exec_grid,
             exec_mode=cfg.exec_mode,
-            strategy_col=model.strategy_col,
+            alpha_col=model.alpha_col,
+            action_col=model.action_col,
         )
+        # 预测层：训练/更新预测模型（当前 SimpleModel 为占位）
         model.fit(dataset)
 
-        # 1) 信号生成：输出 signals.csv
-        sr = SignalRecord(model, dataset, recorder)
-        sr.generate()
+        # 预测层输出：生成 alpha 并落盘
+        ar = AlphaRecord(model, dataset, recorder)
+        ar.generate()
 
         exec_grid = backtest_config(cfg)
-        # 2) 信号分析：生成各执行时刻收益列、计算 Sharpe，输出 sharpe_by_exec.csv 与分析图
-        sar = SigAnaRecord(
-            recorder, exec_grid, dataset.target_raw, dataset.readouts, model.strategy_col
-        )
-        sharpe_by_exec = sar.generate()
+        # 决策层：alpha -> action（当前为恒等映射），并完成交易时间筛选与分析
+        dr = DecisionRecord(model, dataset, recorder, exec_grid)
+        sharpe_by_exec = dr.generate()
 
-        # 3) 组合回测：选执行时刻并输出净值曲线 equity_curve.csv
+        # 决策层：选择执行时刻（fixed / best_sharpe / policy）
+        # 回测执行：基于决策结果计算收益并输出净值曲线
         par = PortAnaRecord(
             recorder,
             cfg,
             sharpe_by_exec,
             dataset.target_raw,
             dataset.readouts,
-            model.strategy_col,
+            model.action_col,
         )
-        par.generate()
+        return_series, chosen_exec = par.generate()
+
+        print_backtest_report(
+            return_series,
+            cfg.output_dir,
+            model.action_col,
+            chosen_exec,
+        )
 
     # 输出全量读数
     if dataset.readouts is not None:
         dataset.readouts.to_csv(cfg.output_dir / "readouts_full.csv", index=True)
+    print_saved_artifacts(cfg.output_dir)
     return 0
 
 

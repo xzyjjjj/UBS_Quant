@@ -76,7 +76,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%
 %改这里可以修改实验报告表头的信息
 \newcommand{\name}{许震宇}
-\newcommand{\mydate}{2026.2.13}
+\newcommand{\mydate}{2026.2.16}
 % \newcommand{\major}{计算机科学与技术}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -85,65 +85,44 @@
 
 \input{tex_file/head.tex}
 
-\section{Week 1：API 选取逻辑}
+\section{Week 2：数据清洗与特征工程}
 
-本周目标：完成三类日频数据的稳定采集，并输出可复现的数据集。
+本周目标：在统一面板（\texttt{output/market\_panel/processed/panel.csv}）上完成预处理，并构建可复用的特征列（特征实现与数据拉取解耦，避免每次加特征都重新下载）。
+
+\subsection{数据处理}
 \begin{itemize}
-  \item JPM 股价（日频）
-  \item 美债利率（尽量全：常用 DGS* 常数期限收益率）
-  \item VIX（2018--2024）
+  \item \textbf{缺失值插值}：面板外连接后，对连续缺失做前向填充（\texttt{ffill}），保证宏观/利率类序列在交易日可用。
+  \item \textbf{异常值 IQR}：对特征列可采用 IQR 截尾（winsorize），将极端值裁剪到 $[Q1-1.5\mathrm{IQR},\, Q3+1.5\mathrm{IQR}]$，降低尖峰对模型/回测的影响。
 \end{itemize}
 
-\subsection{Yahoo Finance（yfinance）}
-\begin{itemize}
-  \item 选择：用于 \textbf{JPM} 日频 OHLCV（\texttt{Open/High/Low/Close/Adj Close/Volume}）。
-  \item 理由：无需 API key，字段齐全，快速验证。
-  \item 代价：非官方接口，可能限流（尤其指数类 ticker）。
-\end{itemize}
-
-\subsection{FRED}
-\begin{itemize}
-  \item 选择：用于 \textbf{VIX}（\texttt{VIXCLS}）与 \textbf{美债利率}（\texttt{DGS1MO ... DGS30}）。
-  \item 理由：宏观与利率数据更稳定；期限覆盖更全；更适合作为主数据源。
-  \item 配置：建议在项目根目录 \texttt{.env} 中设置 \texttt{FRED\_API\_KEY}。
-\end{itemize}
-
-\subsection{Alpha Vantage}
-\begin{itemize}
-  \item 选择：作为 \textbf{JPM} 的备选接口（当 Yahoo 限流时）。
-  \item 结论：本次测试 key 返回 ``premium endpoint'' 提示，当前实现的端点不可用，因此不作为主链路。
-\end{itemize}
-
-\section{输出（数据集落盘）}
-
-\subsection{一键生成命令}
-\begin{verbatim}
-python src/quant_research/data/sources/run_market_panel_pipeline.py --start 2018-01-01 --end 2024-12-31 --vol-source fred
-\end{verbatim}
-
-\subsection{输出文件}
+\subsection{特征构建（5 类）}
 \begin{table}[H]
   \centering
   \renewcommand{\arraystretch}{1.15}
-  \begin{tabularx}{\textwidth}{lXl}
+  \begin{tabularx}{\textwidth}{lX}
     \toprule
-    文件 & 内容 & 数据源 \\
+    特征 & 定义（简述） \\
     \midrule
-    \texttt{output/market\_panel/raw/equity\_daily.csv} & Equity 日频 OHLCV（raw） & Yahoo Finance \\
-    \texttt{output/market\_panel/raw/vol\_daily.csv} & Vol（\texttt{VIXCLS}，raw） & FRED \\
-    \texttt{output/market\_panel/raw/treasury\_yields.csv} & 美债收益率（\texttt{DGS*}，raw） & FRED \\
-    \texttt{output/market\_panel/processed/panel.csv} & 按 date 外连接的统一面板（processed） & 以上三者 \\
+    滚动波动率 & $\sigma_w=\mathrm{Std}\big(\Delta\log(P)\big)_w\cdot\sqrt{252}$，$w\in\{21,63,252\}$（\texttt{equity\_rvol\_\{w\}}）\\
+    日收益率 & $r_t=P_t/P_{t-1}-1$（优先 \texttt{equity\_adj\_close}；\texttt{equity\_ret\_1d}）\\
+    分红增长 & 分红事件日：$g=\mathrm{Div}_t/\mathrm{Div}_{t-1}-1$；非分红日可 \texttt{ffill}（\texttt{equity\_div\_growth}）\\
+    VIX 相关性 & $\rho_w=\mathrm{Corr}\big(r^{eq},\, r^{vix}\big)_w$，$r^{vix}=\Delta\mathrm{VIX}/\mathrm{VIX}$（\texttt{equity\_vix\_corr\_\{w\}}）\\
+    利率动量 & $m_h=\mathrm{DGS10}_t-\mathrm{DGS10}_{t-h}$，$h\in\{21,63\}$；并给出 252 日 $z$-score（\texttt{rate\_mom\_dgs10\_21/63} 与 \texttt{\_z252}）\\
     \bottomrule
   \end{tabularx}
-  \caption{Week 1 输出文件说明}
+  \caption{Week 2 特征列表（按面板列输出）}
 \end{table}
 
-\subsection{输出示例}
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.9\textwidth]{fig/pannel.png}
-  \caption{合并后的输出结果}
-\end{figure}
+\subsection{复现与解耦（不重复下载）}
+\begin{itemize}
+  \item 只构建/更新特征（不触网）：\texttt{--mode features}
+  \item 只构建面板（不触网）：\texttt{--mode panel}
+  \item 只拉取 raw（触网；缓存存在默认复用，强制刷新用 \texttt{--refresh-raw}）：\texttt{--mode fetch}
+\end{itemize}
+
+\begin{verbatim}
+python src/quant_research/data/sources/run_market_panel_pipeline.py --mode features
+\end{verbatim}
 
 
 \end{document}

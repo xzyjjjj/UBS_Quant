@@ -8,7 +8,7 @@
 - `yahoo_finance.py`：Yahoo/yfinance 日频行情
 - `alpha_vantage.py`：Alpha Vantage 日频（adjusted）行情
 - `market_panel.py`：示例数据面板（Equity/Vol/Rates）拉取与面板构建
-- `run_market_panel_pipeline.py`：一键跑完整 pipeline（fetch + panel + save）
+- `run_market_panel_pipeline.py`：可分阶段跑的 pipeline（fetch/panel/features/all）
 
 ## 用法示例
 

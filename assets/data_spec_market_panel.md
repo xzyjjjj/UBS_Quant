@@ -7,7 +7,7 @@
 ### Equity（日频）
 - 标的：默认 `JPM`（可通过脚本参数修改）
 - 频率：日频（交易日）
-- 字段（raw）：`Open/High/Low/Close/Adj Close/Volume`
+- 字段（raw）：`Open/High/Low/Close/Adj Close/Volume`（并开启 actions 时额外包含 `Dividends/Stock Splits`）
 - 落盘：
   - `output/market_panel/raw/equity_daily.csv`
 
@@ -44,7 +44,22 @@
   - Vol（FRED）：`vol_close`（由 `VIXCLS` 重命名）
   - Vol（Yahoo 可选）：`vol_open/vol_high/vol_low/vol_close/vol_adj_close/vol_volume`
   - 美债：`DGS1MO ... DGS30`（保持 FRED 原 series id）
+  - 日收益率：`equity_ret_1d`，基于 `equity_adj_close`（若缺失则回退 `equity_close`）计算 simple return（`pct_change()`）
+  - 滚动波动率（Realized Vol，年化）：`equity_rvol_{window}`（默认输出 `21/63/252`），基于 `equity_adj_close`（若缺失则回退 `equity_close`）计算 log return，再做 `rolling(window).std()`，并乘以 `sqrt(252)` 年化
+  - 分红增长（逐次派息增长）：`equity_div_growth`，仅在分红事件上计算 `div_t / div_prev - 1`，并对非分红日做 `ffill`（无历史分红则为 NaN）
+  - VIX 与 Equity 相关性：`equity_vix_corr_{window}`（默认 `21/63/252`），相关性计算基于 `equity_ret_1d` 与 `vol_close.pct_change()`
+  - 利率动量（DGS10）：`rate_mom_dgs10_21/63` 及 `rate_mom_dgs10_21/63_z252`，动量为 `DGS10.diff(h)`，zscore 为滚动 252 日标准化
+  - 新闻情绪分数（0--1）：`news_sent_01` 与 `news_sent_01_ewm7`（来源：`output/news/sentiment_daily.csv`，由 GDELT tone 日聚合后 sigmoid 映射得到）
 
 ## 5) 一键脚本
 
 执行入口：`src/quant_research/data/sources/run_market_panel_pipeline.py`
+
+可分阶段运行（避免每次加 feature 都重新下载）：
+- `--mode fetch`：只下载 raw 并落盘（会触网）
+- `--mode panel`：只用已落盘 raw 构建 `processed/panel.csv`（不触网）
+- `--mode features`：只在已有 `processed/panel.csv` 上追加特征列（不触网）
+- `--mode all`：完整流程（默认）
+
+缓存策略（避免冲掉本地 raw）：
+- 默认会优先使用 `output/market_panel/raw/` 下的缓存；除非传 `--refresh-raw` 才会强制重新下载并覆盖

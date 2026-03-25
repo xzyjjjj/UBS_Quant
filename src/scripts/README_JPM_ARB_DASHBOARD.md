@@ -32,8 +32,26 @@ pip install streamlit pandas requests
 
 ## Key output columns
 - `mispricing = market_mid - model_fair`
-- `edge = |mispricing| - est_cost`
+- `gross_edge = |mispricing|`
+- `net_edge = gross_edge - est_cost`
+- `edge` equals `net_edge` for backward compatibility
 - `iv_mkt`: implied vol solved from market mid
 - `iv_fair`: implied vol solved from model fair price
 - `vol_edge = iv_mkt - iv_fair`
 - `vol_action`: `SELL_VOL` (vol_edge>0) / `BUY_VOL` (vol_edge<0)
+- `price_signal_ok`: price-edge threshold pass
+- `vol_signal_ok`: vol-edge threshold pass
+- `signal_confirmed`: both views pass together (`CONFIRMED_BOTH`)
+
+## Signal and data-quality logic
+- Signal trigger:
+  - Price view uses `net_edge >= min_edge`
+  - Vol view uses `|vol_edge| >= min_abs_vol_edge`
+  - `Both` mode requires confirmation from both views
+- Cost model:
+  - `est_cost = fee_per_contract + slippage_bps*mid + spread_cross_ratio*spread`
+  - cost is deducted before signal trigger (net edge)
+- Hybrid timestamp checks:
+  - align check between Futu option quote timestamp and Alpha spot timestamp
+  - freshness SLA checks for both sources
+  - warnings shown in dashboard caption when threshold is breached or timestamps are missing
